@@ -1,0 +1,157 @@
+esphome:
+  name: d1mini1
+  friendly_name: d1mini1
+
+esp8266:
+  board: esp01_1m
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "home_assistant_api_encryption_key"
+
+ota:
+  - platform: esphome
+    password: "home_assistant_ota_password"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "D1Mini1 Fallback Hotspot"
+    password: "home_assistant_fallback_password"
+
+captive_portal:
+
+# static const uint8_t D0   = 16;
+# static const uint8_t D1   = 5;
+# static const uint8_t D2   = 4;
+# static const uint8_t D3   = 0;
+# static const uint8_t D4   = 2;
+# static const uint8_t D5   = 14;
+# static const uint8_t D6   = 12;
+# static const uint8_t D7   = 13;
+# static const uint8_t D8   = 15;
+# static const uint8_t RX   = 3;
+# static const uint8_t TX   = 1;
+output:
+  - platform: gpio
+    id: pin_d8
+    pin: GPIO15  # D8
+  - platform: gpio
+    id: pin_d7
+    pin: GPIO13  # D7
+
+# Example configuration entry
+i2c:
+  - id: bus_a
+    scl: GPIO5 # D1
+    sda: GPIO4 # D2
+    scan: true
+
+sensor:
+  - platform: ina219
+    i2c_id: bus_a
+    address: 0x40
+    shunt_resistance: 0.1 ohm
+    current:
+      name: "Window Motor Current"
+      id: ina219_current
+      filters:
+        - delta: 0.002
+      on_value:
+        then:
+          - lambda: |-
+              static float prev = 0.0;
+              static int climb_cnt = 0;
+              static int in_rush = 0;
+              static int reverse = 0;
+              // 'x' contains the new value (float)
+              float abs_prev = abs(prev);
+              float abs_x = abs(x);
+              // Recognizing and ignoring inrush current
+              if ((abs_prev < 0.03) && (abs_x > 0.6)) {
+                in_rush++;
+                ESP_LOGD("main", "Inrush: %d %f", in_rush, x);
+                if (in_rush > 2) {
+                    in_rush = 0; // time too long, not inrush any more
+                } else {
+                  return; // ignore short period of high current
+                }
+              } else {
+                in_rush = 0;
+              }
+              if (abs_x > 0.8) {
+                // Motor stalling
+                id(switch2).turn_off();
+                id(switch1).turn_off();
+                climb_cnt = 0;
+                prev = x;
+                reverse = 0;
+                return;
+              }
+              if (reverse > 0){
+                // Only got here when closing the window
+                // and stalled, we back up a little
+                // to release the pressure on the crank
+                reverse++;
+                if (reverse > 2) {
+                  reverse = 0;
+                  id(switch2).turn_off();
+                  id(switch1).turn_off();
+                }
+                prev = x;
+                climb_cnt = 0;
+                return;
+              }
+              // Lower motor stalling threshold while closing window
+              if (prev < -0.17 && (x - prev) < -0.002) {
+                climb_cnt++;
+                ESP_LOGD("main", "Climb: %d %.4f", climb_cnt, x);
+                if (climb_cnt > 3 && x < -0.4) {
+                  id(switch1).toggle();
+                  id(switch2).toggle();
+                  climb_cnt = 0;
+                  reverse = 1;
+                }
+              } else {
+                climb_cnt = 0;
+              }
+              prev = x;
+    max_voltage: 32.0V
+    max_current: 3.2A
+    update_interval: 10ms
+
+switch:
+  - platform: output
+    name: "switch1"
+    output: pin_d8
+    id: switch1
+  - platform: output
+    name: "switch2"
+    output: pin_d7
+    id: switch2
+
+cover:
+  - platform: template
+    name: "Clerestory Window"
+    id: HighWindow
+    optimistic: True
+    open_action: 
+      - switch.turn_off: switch1
+      - switch.turn_on: switch2
+      - delay: 15s
+      - switch.turn_off: switch2
+    close_action: 
+      - switch.turn_off: switch2
+      - switch.turn_on: switch1
+      - delay: 60s
+      - switch.turn_off: switch1
+    stop_action: 
+      - switch.turn_off: switch1
+      - switch.turn_off: switch2
